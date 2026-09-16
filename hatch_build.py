@@ -17,6 +17,8 @@ class CustomBuildHook(BuildHookInterface):
     """
 
     LICENSE_NAME = "LICENSE-cffi"
+    LICENSE_MAJOR_VERSION = "2"
+    FALLBACK_LICENSE = "LICENSE-cffi-2"
 
     @cached_property
     def local_cffi_license(self) -> str:
@@ -24,29 +26,41 @@ class CustomBuildHook(BuildHookInterface):
 
     @staticmethod
     def get_cffi_distribution_license_files() -> list[PackagePath]:
-        license_files = []
+        return [
+            file
+            for file in distribution("cffi").files or []
+            if file.name == "LICENSE" and file.parts[0].endswith(".dist-info")
+        ]
 
-        dist_files = distribution("cffi").files or []
-        for f in dist_files:
-            if f.name == "LICENSE" and f.parts[0].endswith(".dist-info"):
-                license_files.append(f)
-                break
+    def locate_cffi_license(self) -> str:
+        cffi_distribution = distribution("cffi")
+        license_files = self.get_cffi_distribution_license_files()
+        if len(license_files) == 1:
+            return str(license_files[0].locate())
 
-        return license_files
+        major_version = cffi_distribution.version.partition(".")[0]
+        if major_version != self.LICENSE_MAJOR_VERSION:
+            message = (
+                f"Could not locate the CFFI license for version {cffi_distribution.version}, "
+                "and no matching fallback is available"
+            )
+            raise RuntimeError(message)
+        return os.path.join(self.root, self.FALLBACK_LICENSE)
 
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:  # noqa: ARG002
-        cffi_shared_lib = _cffi_backend.__file__
-        relative_path = f"coincurve/{os.path.basename(cffi_shared_lib)}"
-        build_data["force_include"][cffi_shared_lib] = relative_path
+        if os.environ.get("COINCURVE_VENDOR_CFFI", "1") != "1":
+            return
 
-        license_files = self.get_cffi_distribution_license_files()
-        if len(license_files) != 1:
-            message = f"Expected exactly one LICENSE file in cffi distribution, got {len(license_files)}"
+        cffi_shared_lib = _cffi_backend.__file__
+        if cffi_shared_lib is None:
+            message = "Could not locate the _cffi_backend extension module"
             raise RuntimeError(message)
 
-        license_file = license_files[0]
-        shutil.copy2(license_file.locate(), self.local_cffi_license)
+        relative_path = f"coincurve/{os.path.basename(cffi_shared_lib)}"
+        build_data["force_include"][cffi_shared_lib] = relative_path
+        shutil.copy2(self.locate_cffi_license(), self.local_cffi_license)
         self.metadata.core.license_files.append(self.LICENSE_NAME)
 
     def finalize(self, version: str, build_data: dict[str, Any], artifact: str) -> None:  # noqa: ARG002
-        os.remove(self.local_cffi_license)
+        if os.path.isfile(self.local_cffi_license):
+            os.remove(self.local_cffi_license)
